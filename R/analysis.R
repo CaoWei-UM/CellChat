@@ -592,7 +592,84 @@ computeNetSimilarityPairwise <- function(object, slot.name = "netP", type = c("f
   methods::slot(object, slot.name)$similarity[[type]]$matrix[[comparison.name]] <- Similarity
   return(object)
 }
-
+                                                   
+#' Compute signaling network similarity for internal celltype
+#'
+#' @param object A Single CellChat object
+#' @param slot.name the slot name of object that is used to compute centrality measures of signaling networks
+#' @param type "functional","structural"
+#' @param comparison a character vector giving the datasets for comparison
+#' @param k the number of nearest neighbors
+#' @param thresh the fraction (0 to 0.25) of interactions to be trimmed before computing network similarity
+#' @importFrom methods slot
+#'
+#' @return
+#' @export
+#'
+computeNetSimilarityInternal <- function(object, comparison, slot.name = "netP", type = c("functional","structural"), k = NULL, thresh = NULL){
+  type <- match.arg(type)
+  if(class(object@idents)!="factor"){stop('This function only for single dataset')}
+  if((!all(comparison %in% unique(object@idents)))|(length(comparison)>=length(unique(object@idents)))){
+      stop('Some comparison element not in idents')
+  }
+  cat("Compute signaling network similarity for datasets", as.character(comparison), '\n')
+  comparison.name <- paste(comparison, collapse = "-")
+  constant_idents<-setdiff(unique(object@idents),comparison)
+  net<-lapply(comparison,function(x){
+    kept_idents<-c(constant_idents,x)
+    object.net<-methods::slot(object,slot.name)$prob[kept_idents,kept_idents,]
+    dimnames(object.net)[[1]]<-dimnames(object.net)[[2]]<-c(constant_idents,'measured')
+    dimnames(object.net)[[3]]<-paste0(dimnames(object.net)[[3]], "--", x)
+    return(object.net)
+  })
+  names(net)<-comparison
+  nnet <- sum(sapply(net, dim)[3,])
+  if(is.null(k)){k<-ifelse(nnet <= 25,ceiling(sqrt(nnet)),ceiling(sqrt(nnet)) + 1)}
+  if (!is.null(thresh)) {
+    for (i in 1:length(net)) {
+      neti <- net[[i]]
+      neti[neti < quantile(c(neti[neti != 0]), thresh)] <- 0
+      net[[i]] <- neti
+    }
+  }
+  net.all<-abind::abind(net)
+  net.names<-dimnames(net.all)[[3]]
+  net.all.logical<-(net.all>0)
+  if(type == "functional"){
+    computeNetD_functional<-function(g,h){sum(g&h)/sum(g|h)}
+    half_S3<-as.data.frame(t(combn(net.names,2,FUN = function(x){
+      c(x[1],x[2],computeNetD_functional(net.all.logical[,,x[1]],net.all.logical[,,x[2]]))
+    })))
+    half_S3$V3<-as.numeric(half_S3$V3)
+    half_S3_2<-half_S3[,c(2,1,3)]
+    colnames(half_S3_2)<-colnames(half_S3)
+    S3<-rbind(half_S3,half_S3_2)
+    S_signalings<-reshape2::acast(S3,formula = V1 ~ V2,value.var = 'V3')[net.names,net.names]
+    S_signalings[is.na(S_signalings)] <- 0
+    diag(S_signalings) <- 1
+  } else if(type == "structural"){ 
+    half_S3<-as.data.frame(t(combn(net.names,2,FUN = function(x){
+      c(x[1],x[2],computeNetD_structure((net.all.logical[,,x[1]])*1,(net.all.logical[,,x[2]]))*1)
+    })))
+    half_S3$V3<-as.numeric(half_S3$V3)
+    half_S3_2<-half_S3[,c(2,1,3)]
+    colnames(half_S3_2)<-colnames(half_S3)
+    S3<-rbind(half_S3,half_S3_2)
+    D_signalings<-reshape2::acast(S3,formula = V1 ~ V2,value.var = 'V3')[net.names,net.names]
+    D_signalings[is.infinite(D_signalings)] <- 0
+    D_signalings[is.na(D_signalings)] <- 0
+    S_signalings <- 1-D_signalings
+  }
+  # smooth the similarity matrix using SNN
+  SNN <- buildSNN(S_signalings, k = k, prune.SNN = 1/15)
+  Similarity <- as.matrix(S_signalings*SNN)
+  colnames(Similarity) <- rownames(Similarity) <- net.names
+  if (!is.list(methods::slot(object, slot.name)$similarity[[type]]$matrix)) {
+    methods::slot(object, slot.name)$similarity[[type]]$matrix <- NULL
+  }
+  methods::slot(object, slot.name)$similarity[[type]]$matrix[[comparison.name]] <- Similarity
+  return(object)
+}
 
 #' Manifold learning of the signaling networks based on their similarity
 #'
